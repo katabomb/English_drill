@@ -232,6 +232,10 @@
       min-height: 34px;
       font-weight: 800;
       line-height: 1.6;
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 6px;
     }
 
     .feedback.ok { color: var(--ok); }
@@ -253,6 +257,50 @@
       margin-top: 8px;
       font-weight: 800;
       color: var(--accent);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .speakBtn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 34px;
+      height: 34px;
+      min-height: 34px;
+      padding: 0;
+      border-radius: 50%;
+      border: 1px solid var(--line);
+      background: var(--card);
+      color: var(--accent);
+      cursor: pointer;
+      font-size: 1rem;
+      transition: transform 0.12s ease, box-shadow 0.12s ease, background 0.12s ease;
+      flex-shrink: 0;
+    }
+
+    .speakBtn:hover {
+      background: var(--soft);
+      transform: translateY(-1px);
+      box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+    }
+
+    .speakBtn.speaking {
+      background: var(--accent);
+      color: white;
+      border-color: var(--accent);
+    }
+
+    .promptRow {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+    }
+
+    .promptRow .sentence {
+      flex: 1;
     }
 
     .smallNote {
@@ -312,7 +360,10 @@
 
       <div class="box">
         <div class="label">普通の文・意味</div>
-        <div class="sentence" id="promptSentence"></div>
+        <div class="promptRow">
+          <div class="sentence" id="promptSentence"></div>
+          <button class="speakBtn" id="speakPromptBtn" title="問題文を読み上げる">🔊</button>
+        </div>
       </div>
 
       <div class="box">
@@ -477,11 +528,73 @@
       resetBtn: document.getElementById('resetBtn'),
       showBtn: document.getElementById('showBtn'),
       feedback: document.getElementById('feedback'),
-      explanation: document.getElementById('explanation')
+      explanation: document.getElementById('explanation'),
+      speakPromptBtn: document.getElementById('speakPromptBtn')
     };
 
+    // ---- Speech synthesis ----
+    let currentUtterance = null;
+
+    function speak(text, btn) {
+      if (!window.speechSynthesis) return;
+      window.speechSynthesis.cancel();
+      if (currentUtterance && btn && btn.classList.contains('speaking')) {
+        btn.classList.remove('speaking');
+        currentUtterance = null;
+        return;
+      }
+      // Reset all speak buttons
+      document.querySelectorAll('.speakBtn').forEach(b => b.classList.remove('speaking'));
+      const utter = new SpeechSynthesisUtterance(text);
+      utter.lang = 'en-US';
+      utter.rate = 0.92;
+      if (btn) btn.classList.add('speaking');
+      utter.onend = () => { if (btn) btn.classList.remove('speaking'); currentUtterance = null; };
+      utter.onerror = () => { if (btn) btn.classList.remove('speaking'); currentUtterance = null; };
+      currentUtterance = utter;
+      window.speechSynthesis.speak(utter);
+    }
+
+    // ---- Chip normalization ----
+    // Split "word," → ["word", ","]  and  "word." → ["word", "."]
+    // Also lowercase the display text (answer comparison uses the original answer string)
     function tokenize(sentence) {
-      return sentence.match(/[^\s]+/g) || [];
+      const raw = sentence.match(/[^\s]+/g) || [];
+      const tokens = [];
+      for (const t of raw) {
+        // Separate trailing punctuation: commas, periods, exclamation, question, semicolon, colon
+        const m = t.match(/^(.*?)([,\.!?;:]+)$/);
+        if (m && m[1]) {
+          tokens.push(m[1]);   // word without punctuation
+          tokens.push(m[2]);   // punctuation as separate token
+        } else {
+          tokens.push(t);
+        }
+      }
+      return tokens;
+    }
+
+    // Display text on chip: lowercase first letter (sentence-start capitals → lowercase)
+    // Punctuation chips are kept as-is
+    function chipDisplayText(token) {
+      if (/^[,\.!?;:]+$/.test(token)) return token; // pure punctuation
+      // Lowercase only if the token is ALL-caps-first and not an acronym (heuristic: length > 1 or all caps)
+      return token.charAt(0).toLowerCase() + token.slice(1);
+    }
+
+    // Build the "answer" string from chip display texts for comparison
+    // We reconstruct by joining with spaces but attach punctuation tokens to previous word
+    function reconstructAnswer(chips) {
+      const texts = chips.map(el => el.dataset.display);
+      const parts = [];
+      for (let i = 0; i < texts.length; i++) {
+        if (/^[,\.!?;:]+$/.test(texts[i]) && parts.length > 0) {
+          parts[parts.length - 1] += texts[i];
+        } else {
+          parts.push(texts[i]);
+        }
+      }
+      return parts.join(' ');
     }
 
     function normalizeText(text) {
@@ -497,12 +610,14 @@
       return a;
     }
 
-    function makeChip(text) {
+    function makeChip(token) {
+      const display = chipDisplayText(token);
       const div = document.createElement('div');
       div.className = 'chip';
-      div.textContent = text;
-      div.draggable = true;
+      div.textContent = display;
+      div.dataset.display = display;
       div.dataset.id = String(chipId++);
+      div.draggable = true;
       div.addEventListener('dragstart', e => {
         div.classList.add('dragging');
         e.dataTransfer.setData('text/plain', div.dataset.id);
@@ -548,6 +663,9 @@
 
     function render() {
       if (!filtered.length) return;
+      // Stop any ongoing speech
+      if (window.speechSynthesis) window.speechSynthesis.cancel();
+      document.querySelectorAll('.speakBtn').forEach(b => b.classList.remove('speaking'));
       const q = filtered[current];
       els.qNum.textContent = `Q${current + 1} / ${filtered.length}`;
       els.categoryBadge.textContent = categoryNames[q.cat];
@@ -565,11 +683,23 @@
     }
 
     function userAnswer() {
-      return normalizeText([...els.dropzone.querySelectorAll('.chip')].map(el => el.textContent).join(' '));
+      const chips = [...els.dropzone.querySelectorAll('.chip')];
+      return reconstructAnswer(chips);
     }
 
     function currentAnswer() {
-      return normalizeText(filtered[current].answer);
+      // Normalize the answer the same way chips are normalized for comparison
+      const tokens = tokenize(filtered[current].answer);
+      const normalized = tokens.map(t => chipDisplayText(t));
+      const parts = [];
+      for (let i = 0; i < normalized.length; i++) {
+        if (/^[,\.!?;:]+$/.test(normalized[i]) && parts.length > 0) {
+          parts[parts.length - 1] += normalized[i];
+        } else {
+          parts.push(normalized[i]);
+        }
+      }
+      return parts.join(' ');
     }
 
     function checkAnswer() {
@@ -581,7 +711,8 @@
       if (user === currentAnswer()) {
         const globalIndex = questions.indexOf(filtered[current]);
         solved.add(globalIndex);
-        setFeedback('正解です！この語順、かなり大事です。', 'ok');
+        const answerText = filtered[current].answer;
+        setFeedbackWithSpeak('正解です！この語順、かなり大事です。', 'ok', answerText);
         showExplanation(false);
         updateProgress();
       } else {
@@ -593,7 +724,7 @@
       const q = filtered[current];
       els.explanation.innerHTML = `
         <div><strong>ポイント：</strong>${q.exp}</div>
-        ${includeAnswer ? `<div class="answerLine">答え：${q.answer}</div>` : `<div class="answerLine">答え：${q.answer}</div>`}
+        <div class="answerLine">答え：${q.answer} <button class="speakBtn" onclick="speak('${q.answer.replace(/'/g,"\\'")}', this)" title="正解文を読み上げる">🔊</button></div>
       `;
       els.explanation.classList.add('show');
     }
@@ -619,6 +750,20 @@
     function setFeedback(text, type) {
       els.feedback.textContent = text;
       els.feedback.className = `feedback ${type}`;
+    }
+
+    function setFeedbackWithSpeak(text, type, speakText) {
+      els.feedback.className = `feedback ${type}`;
+      els.feedback.innerHTML = '';
+      const span = document.createElement('span');
+      span.textContent = text + '　';
+      els.feedback.appendChild(span);
+      const btn = document.createElement('button');
+      btn.className = 'speakBtn';
+      btn.title = '正解文を読み上げる';
+      btn.textContent = '🔊';
+      btn.addEventListener('click', () => speak(speakText, btn));
+      els.feedback.appendChild(btn);
     }
 
     function clearFeedback() {
@@ -658,6 +803,9 @@
     els.nextBtn.addEventListener('click', () => go(1));
     els.shuffleBtn.addEventListener('click', shuffleOrder);
     els.categorySelect.addEventListener('change', applyFilter);
+    els.speakPromptBtn.addEventListener('click', () => {
+      speak(filtered[current].normal, els.speakPromptBtn);
+    });
 
     setupDnD(els.dropzone);
     setupDnD(els.wordbank);
